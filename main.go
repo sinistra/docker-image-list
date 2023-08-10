@@ -1,21 +1,27 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
+	"log"
 	"os/exec"
 	"sort"
 	"strings"
-
-	"github.com/fatih/color"
 )
 
 type dockerImage struct {
-	repository string
-	tag        string
-	id         string
-	created    string
-	size       string
+	Containers   string `json:"Containers"`
+	CreatedAt    string `json:"CreatedAt"`
+	CreatedSince string `json:"CreatedSince"`
+	Digest       string `json:"Digest"`
+	ID           string `json:"ID"`
+	Repository   string `json:"Repository"`
+	SharedSize   string `json:"SharedSize"`
+	Size         string `json:"Size"`
+	Tag          string `json:"Tag"`
+	UniqueSize   string `json:"UniqueSize"`
+	VirtualSize  string `json:"VirtualSize"`
+	Architecture string `json:"Architecture"`
 }
 
 type columnLength struct {
@@ -24,51 +30,70 @@ type columnLength struct {
 	id         int
 	created    int
 	size       int
+	arch       int
 }
 
-var (
-	images []dockerImage
-	column columnLength
-)
+var column columnLength
 
 func main() {
-	cmd := exec.Command("docker", "image", "ls")
-	out, err := cmd.CombinedOutput()
+	out, err := getDockerImagesAsJson()
 	if err != nil {
-		color.Red("[docker: %s\n", err.Error())
-		os.Exit(1)
-	}
-	output := strings.Split(string(out), "\n")
-	for i, line := range output {
-		// don't want the header line
-		if i == 0 {
-			continue
-		}
-		lineSlice := strings.Split(line, "  ")
-		var strippedLine []string
-		for _, piece := range lineSlice {
-			piece = strings.TrimSpace(piece)
-			if len(piece) > 0 {
-				strippedLine = append(strippedLine, piece)
-			}
-		}
-		if len(strippedLine) == 5 {
-			column.repository = maxInt(column.repository, len(strippedLine[0]))
-			column.tag = maxInt(column.tag, len(strippedLine[1]))
-			column.id = maxInt(column.id, len(strippedLine[2]))
-			column.created = maxInt(column.created, len(strippedLine[3]))
-			column.size = maxInt(column.size, len(strippedLine[4]))
-			images = append(images, dockerImage{
-				repository: strippedLine[0],
-				tag:        strippedLine[1],
-				id:         strippedLine[2],
-				created:    strippedLine[3],
-				size:       strippedLine[4],
-			})
-		}
+		log.Fatalf("[docker: %s\n", err)
 	}
 
-	displayImagesByName()
+	dockerImages, err := convertJsonListToSlice(out)
+	if err != nil {
+		log.Fatalf("error converting json to slice: %s", err)
+	}
+
+	addArchitectureToImages(dockerImages)
+
+	for _, image := range *dockerImages {
+		column.repository = maxInt(column.repository, len(image.Repository))
+		column.tag = maxInt(column.tag, len(image.Tag))
+		column.id = maxInt(column.id, len(image.ID))
+		column.created = maxInt(column.created, len(image.CreatedSince))
+		column.size = maxInt(column.size, len(image.Size))
+		column.arch = maxInt(column.arch, len(image.Architecture))
+	}
+
+	displayImagesByName(*dockerImages)
+}
+
+func addArchitectureToImages(images *[]dockerImage) {
+	for i, image := range *images {
+		arch, err := getImageArchitecture(image.ID)
+		if err != nil {
+			log.Fatalf("getImageArchitecture failed: %s", err)
+		}
+		(*images)[i].Architecture = strings.TrimSpace(string(arch))
+	}
+}
+
+func getImageArchitecture(id string) ([]byte, error) {
+	cmd := exec.Command("docker", "image", "inspect", id, "--format", "{{.Architecture}}")
+	return cmd.CombinedOutput()
+}
+
+func convertJsonListToSlice(out []byte) (*[]dockerImage, error) {
+	output := strings.Split(string(out), "\n")
+	var dockerImages []dockerImage
+	for _, line := range output {
+		var image dockerImage
+		if len(line) > 0 {
+			err := json.Unmarshal([]byte(line), &image)
+			if err != nil {
+				return nil, err
+			}
+			dockerImages = append(dockerImages, image)
+		}
+	}
+	return &dockerImages, nil
+}
+
+func getDockerImagesAsJson() ([]byte, error) {
+	cmd := exec.Command("docker", "image", "ls", "--format", "json")
+	return cmd.CombinedOutput()
 }
 
 func maxInt(a, b int) int {
@@ -78,26 +103,36 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func displayImagesByName() {
+func displayImagesByName(images []dockerImage) {
 	sort.Slice(images, func(i, j int) bool {
-		return images[i].repository+images[i].tag < images[j].repository+images[j].tag
+		return images[i].Repository+images[i].Tag < images[j].Repository+images[j].Tag
 	})
-	displayImages()
+	displayImages(images)
 }
 
-func displayImages() {
-	fmt.Printf("%*s %*s %*s %*s %*s\n",
+func displayImages(images []dockerImage) {
+	fmt.Printf("%*s %*s %*s %*s %*s %*s\n",
 		-column.repository, "REPOSITORY",
-		-column.tag, "TAG",
+		-20, "TAG",
+		-column.arch, "ARCH",
 		-column.id, "IMAGE ID",
 		-column.created, "CREATED",
 		-column.size, "SIZE")
+
 	for _, image := range images {
-		fmt.Printf("%*s %*s %*s %*s %*s\n",
-			-column.repository, image.repository,
-			-column.tag, image.tag,
-			-column.id, image.id,
-			-column.created, image.created,
-			-column.size, image.size)
+		var tag string
+		if len(image.Tag) > 20 {
+			tag = image.Tag[:20]
+		} else {
+			tag = image.Tag
+		}
+
+		fmt.Printf("%*s %*s %*s %*s %*s %*s\n",
+			-column.repository, image.Repository,
+			-20, tag,
+			-column.arch, image.Architecture,
+			-column.id, image.ID,
+			-column.created, image.CreatedSince,
+			-column.size, image.Size)
 	}
 }
